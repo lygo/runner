@@ -1,62 +1,168 @@
 package runner
 
 import (
-	"google.golang.org/grpc/grpclog"
+	"errors"
+	"fmt"
 	"sync"
+	"sync/atomic"
+
+	"google.golang.org/grpc/grpclog"
 )
 
 type Closer func() error
 type Runner func() error
 
 type App struct {
-	Runners []Runner
-	Slams   []Closer
-	Started chan struct{}
+	Runners     []Runner
+	Slams       []Closer
+	Started     chan struct{}
+	Done        chan int
+	shutdowning chan struct{}
+
+	down            *sync.WaitGroup
+	onceShutdown    *sync.Once
+	onceSetExitCode *sync.Once
+
+	closed   int32
+	exitCode uint8
+	errs     chan error
 }
 
 func New() *App {
 	return &App{
-		Runners: make([]Runner, 0),
-		Slams:   make([]Closer, 0),
-		Started: make(chan struct{}, 0),
+		Runners:         make([]Runner, 0),
+		Slams:           make([]Closer, 0),
+		Started:         make(chan struct{}),
+		Done:            make(chan int, 1),
+		down:            &sync.WaitGroup{},
+		onceShutdown:    &sync.Once{},
+		onceSetExitCode: &sync.Once{},
+		shutdowning:     make(chan struct{}),
+		errs:            make(chan error, 1),
+		closed:          -1,
 	}
 }
 
-func (app *App) Run() error {
+func (app *App) setExitCode(code uint8) {
+	app.onceSetExitCode.Do(func() {
+		app.exitCode = code
+	})
+}
+
+func (app *App) Run() {
 	var (
 		runnersLength = len(app.Runners)
-		errC          = make(chan error, runnersLength)
-		wg            = &sync.WaitGroup{}
+		up            = &sync.WaitGroup{}
 	)
 
-	wg.Add(runnersLength)
-
-	for _, run := range app.Runners {
-		go func() {
-			wg.Done()
-			// TODO: may be add defer for panic recover?
-			errC <- run()
-		}()
+	if len(app.Slams) == 0 {
+		grpclog.Warning(`your app doesn't have functions for close`)
 	}
-	wg.Wait()
+
+	app.errs = make(chan error, runnersLength)
+
+	app.down.Add(runnersLength)
+	up.Add(runnersLength)
+
+	for _, r := range app.Runners {
+		go func(run Runner) {
+			up.Done()
+			defer app.down.Done()
+			defer func() {
+				if e := recover(); e != nil {
+					app.errs <- errors.New(fmt.Sprint(e))
+				}
+			}()
+
+			if err := run(); err != nil {
+				app.errs <- err
+			}
+
+		}(r)
+	}
+	up.Wait()
+
 	if app.Started != nil {
 		close(app.Started)
 	}
-	if err := <-errC; err != nil {
-		app.Shutdown()
-		close(errC)
-		return err
 
-	}
-	return nil
+	// run catcher of error for shutdown application
+	go func() {
+		select {
+		case <-app.shutdowning:
+			return
+		case err, ok := <-app.errs:
+			app.setExitCode(1)
+			if ok {
+				// check shutdowning. may be it will be
+				select {
+				case <-app.shutdowning:
+					grpclog.Error(err)
+					return
+				default:
+				}
+
+				grpclog.Error(err)
+				app.Shutdown()
+			}
+			return
+		}
+	}()
+}
+
+func safelyCallCloser(fn Closer) (err error) {
+	defer func() {
+		if e := recover(); e != nil {
+			err = errors.New(fmt.Sprint(e))
+		}
+	}()
+
+	err = fn()
+
+	return err
 }
 
 func (app *App) Shutdown() {
+
+	if atomic.LoadInt32(&app.closed) != -1 {
+		select {
+		case app.Done <- int(app.closed):
+		default:
+			grpclog.Warning(`channel "Done" don't listen`)
+		}
+		grpclog.Warning(`app already closed`)
+		return
+	}
+
+	app.onceShutdown.Do(app.shutdown)
+}
+
+func (app *App) shutdown() {
+	close(app.shutdowning)
+
 	var err error
 
 	for i := len(app.Slams) - 1; i >= 0; i -= 1 {
-		if err = app.Slams[i](); err != nil {
-			grpclog.Print(err)
+		if err = safelyCallCloser(app.Slams[i]); err != nil {
+			app.setExitCode(1)
+			grpclog.Error(err)
 		}
+	}
+
+	app.down.Wait()
+	close(app.errs)
+
+	for err = range app.errs {
+		if err != nil {
+			grpclog.Error(err)
+		}
+	}
+
+	if err != nil || app.exitCode == 1 {
+		atomic.AddInt32(&app.closed, 2)
+		app.Done <- 1
+	} else {
+		atomic.AddInt32(&app.closed, 1)
+		app.Done <- 0
 	}
 }
