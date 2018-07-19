@@ -3,10 +3,9 @@ package runner
 import (
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"sync/atomic"
-
-	"google.golang.org/grpc/grpclog"
 )
 
 type Closer func() error
@@ -56,7 +55,7 @@ func (app *App) Run() {
 	)
 
 	if len(app.Slams) == 0 {
-		grpclog.Warning(`your app doesn't have functions for close`)
+		log.Println(`WARN: your app doesn't have functions for close`)
 	}
 
 	app.errs = make(chan error, runnersLength)
@@ -97,12 +96,12 @@ func (app *App) Run() {
 				// check shutdowning. may be it will be
 				select {
 				case <-app.shutdowning:
-					grpclog.Error(err)
+					log.Println("ERR:", err)
 					return
 				default:
 				}
 
-				grpclog.Error(err)
+				log.Println("ERR:", err)
 				app.Shutdown()
 			}
 			return
@@ -128,9 +127,10 @@ func (app *App) Shutdown() {
 		select {
 		case app.Done <- int(app.closed):
 		default:
-			grpclog.Warning(`channel "Done" don't listen`)
+			log.Println(`WARN: channel "Done" don't listen`)
 		}
-		grpclog.Warning(`app already closed`)
+
+		log.Println(`WARN: app already closed`)
 		return
 	}
 
@@ -145,7 +145,7 @@ func (app *App) shutdown() {
 	for i := len(app.Slams) - 1; i >= 0; i -= 1 {
 		if err = safelyCallCloser(app.Slams[i]); err != nil {
 			app.setExitCode(1)
-			grpclog.Error(err)
+			log.Println("ERR:", err)
 		}
 	}
 
@@ -154,7 +154,7 @@ func (app *App) shutdown() {
 
 	for err = range app.errs {
 		if err != nil {
-			grpclog.Error(err)
+			log.Println("ERR:", err)
 		}
 	}
 
