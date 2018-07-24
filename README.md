@@ -84,8 +84,8 @@ func New(cfg Config)  (app *runner.App, err error) {
         )),
     )
     
-    someServiceApb.RegisterPaymentsServer(grpcSrv, serviceAImpl.New(cfg))
-    someServiceBpb.RegisterAgreementsServer(grpcSrv, serviceBImpl.New(cfg))
+    someServiceApb.RegisterServiceAServer(grpcSrv, serviceAImpl.New(cfg))
+    someServiceBpb.RegisterServiceBServer(grpcSrv, serviceBImpl.New(cfg))
     
     app.Runners = append(app.Runners, func() error {
         err := grpcSrv.Serve(grpcListener)
@@ -103,12 +103,12 @@ func New(cfg Config)  (app *runner.App, err error) {
     // registry HTTP handlers
     mux := runtime.NewServeMux()
     opts := []grpc.DialOption{grpc.WithInsecure()}
-    err = someServiceBpb.RegisterPaymentsHandlerFromEndpoint(context.Background(), mux, cfg.GrpcAddr, opts)
+    err = someServiceBpb.RegisterServiceAHandlerFromEndpoint(context.Background(), mux, cfg.GrpcAddr, opts)
     if err != nil {
         return
     }
 
-    err = someServiceApb.RegisterAgreementsHandlerFromEndpoint(context.Background(), mux, cfg.GrpcAddr, opts)
+    err = someServiceApb.RegisterServiceBHandlerFromEndpoint(context.Background(), mux, cfg.GrpcAddr, opts)
     if err != nil {
         return
     }
