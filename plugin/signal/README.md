@@ -15,7 +15,6 @@ import (
 )
 
 func main() {
-    var app *runner.Apps
     app := someapp.New(someapp.NewConfig())
  
     // or it can be used inner someapp.New 
